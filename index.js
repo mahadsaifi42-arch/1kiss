@@ -67,7 +67,7 @@ if (GEMINI_API_KEY) {
 
 async function askGemini(prompt) {
   if (!genAI) return "❌ GEMINI_API_KEY missing. Add it in Render ENV.";
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
   const result = await model.generateContent(prompt);
   return result.response.text();
 }
