@@ -213,7 +213,9 @@ client.on("messageCreate", async (message) => {
     }
 
     /* -------------------- UNKNOWN -------------------- */
-    return message.reply("❓ Unknown command. Use `$help`");
+    // prefixless me unknown command pe reply mat karo
+if (!usedPrefix) return;
+return message.reply("❓ Unknown command. Use `$help`");
   } catch (err) {
     console.log("messageCreate error:", err);
   }
