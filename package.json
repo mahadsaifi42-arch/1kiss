@@ -1,0 +1,16 @@
+{
+  "name": "questy-final-multibot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "@discordjs/voice": "^0.16.1",
+    "play-dl": "^1.9.7",
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5",
+    "better-sqlite3": "^9.6.0"
+  }
+}
