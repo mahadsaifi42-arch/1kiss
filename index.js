@@ -1,305 +1,439 @@
 /**
- * ✅ ULTIMATE DISCORD BOT FOR RENDER
- * Node.js v18+ | Discord.js v14 | SQLite | Gemini AI | Express Server
+ * Questy Security + AI + NoPrefix + Prefix + Setup Bot (One-file)
+ * Discord.js v14 + Gemini (AI Studio)
+ *
+ * ENV REQUIRED:
+ * DISCORD_TOKEN=
+ * CLIENT_ID=
+ * OWNER_ID=
+ * GEMINI_API_KEY=
  */
 
-require('dotenv').config();
-const express = require('express');
-const { 
-    Client, GatewayIntentBits, Partials, Collection, 
-    EmbedBuilder, PermissionsBitField, ChannelType, REST, Routes 
-} = require('discord.js');
-const Database = require('better-sqlite3');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { Player } = require('discord-player');
+require("dotenv").config();
 
-// ==========================================
-// 🌍 1. RENDER WEB SERVER (KEEP ALIVE)
-// ==========================================
+const express = require("express");
 const app = express();
-const port = process.env.PORT || 3000;
+app.get("/", (req, res) => res.send("✅ Bot is running!"));
+app.listen(process.env.PORT || 3000, () => console.log("🌐 Web alive"));
 
-app.get('/', (req, res) => {
-    res.send('✅ Bot is Online and Running on Render!');
-});
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  PermissionsBitField,
+  ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+} = require("discord.js");
 
-app.listen(port, () => {
-    console.log(`🔗 Web Server listening on port ${port}`);
-});
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// ==========================================
-// ⚙️ 2. CONFIGURATION & DATABASE
-// ==========================================
-// Note: Render Free Tier deletes SQLite files on restart. 
-// For permanent data, use MongoDB in future.
-const db = new Database('bot_database.sqlite');
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// ====== CONFIG ======
+const PREFIX = "$"; // normal prefix commands
+const OWNER_ID = process.env.OWNER_ID;
 
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// ====== SAFETY CHECKS ======
+if (!DISCORD_TOKEN) throw new Error("❌ Missing DISCORD_TOKEN in env");
+if (!CLIENT_ID) throw new Error("❌ Missing CLIENT_ID in env");
+if (!OWNER_ID) throw new Error("❌ Missing OWNER_ID in env");
+
+// ====== CLIENT ======
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildInvites,
-        GatewayIntentBits.GuildPresences
-    ],
-    partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers, // needed for setup/verify/joins
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, // needed for prefix + no-prefix
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
 });
 
-client.commands = new Collection();
-const player = new Player(client);
-const invitesCache = new Collection();
-const confirmationCache = new Collection(); 
-const raidCache = new Map();
-let panicMode = false;
+// ====== AI ======
+let genAI = null;
+if (GEMINI_API_KEY) {
+  genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+}
 
-// Database Tables
-db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        invites INTEGER DEFAULT 0,
-        messages INTEGER DEFAULT 0,
-        invitedBy TEXT
-    );
-    CREATE TABLE IF NOT EXISTS settings (
-        guild_id TEXT PRIMARY KEY,
-        log_channel TEXT,
-        welcome_channel TEXT,
-        ai_channel TEXT
-    );
-    CREATE TABLE IF NOT EXISTS whitelist (
-        id TEXT PRIMARY KEY
-    );
-`);
+async function askGemini(prompt) {
+  if (!genAI) return "❌ GEMINI_API_KEY missing. Add it in Render ENV.";
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
 
-// ==========================================
-// 🎶 3. MUSIC SYSTEM SETUP
-// ==========================================
-player.events.on('playerStart', (queue, track) => {
-    queue.metadata.channel.send(`🎶 Now playing: **${track.title}**`);
-});
-player.events.on('error', (queue, error) => {
-    console.log(`[Music Error] ${error.message}`);
-});
+// ====== HELP TEXT ======
+const HELP_TEXT = `✅ **Commands List**
 
-// ==========================================
-// 🛠️ 4. SLASH COMMANDS LIST
-// ==========================================
+**Slash Commands**
+- /ping
+- /setup  (Owner only)
+
+**Prefix Commands (${PREFIX})**
+- ${PREFIX}ping
+- ${PREFIX}help
+- ${PREFIX}setup  (Owner only)
+
+**Owner No-Prefix (ONLY in #ai-chat)**
+Type normal text like:
+- hide all channels
+- unhide all channels
+- lock server
+- unlock server
+- setup verification
+- panic mode on
+
+⚠️ Destructive actions ask confirmation (YES).
+`;
+
+// ====== SLASH COMMANDS ======
 const slashCommands = [
-    { name: 'setup', description: 'Auto-configure channels and logs (Owner)' },
-    { name: 'help', description: 'Show command list' },
-    { name: 'ban', description: 'Ban a user', options: [{ name: 'user', type: 6, required: true }, { name: 'reason', type: 3 }] },
-    { name: 'kick', description: 'Kick a user', options: [{ name: 'user', type: 6, required: true }, { name: 'reason', type: 3 }] },
-    { name: 'timeout', description: 'Timeout a user', options: [{ name: 'user', type: 6, required: true }, { name: 'duration', type: 4, required: true }, { name: 'reason', type: 3 }] },
-    { name: 'invites', description: 'Check invites', options: [{ name: 'user', type: 6 }] },
-    { name: 'topmessages', description: 'Top active users' },
-    { name: '8ball', description: 'Ask the magic ball', options: [{ name: 'question', type: 3, required: true }] },
-    { name: 'play', description: 'Play music', options: [{ name: 'query', type: 3, required: true }] },
-    { name: 'stop', description: 'Stop music' },
-    { name: 'skip', description: 'Skip track' }
-];
+  new SlashCommandBuilder().setName("ping").setDescription("Check bot latency"),
+  new SlashCommandBuilder()
+    .setName("setup")
+    .setDescription("Auto create channels + roles + verify + AI channel (Owner only)"),
+].map((c) => c.toJSON());
 
-// ==========================================
-// 🚀 5. INITIALIZATION
-// ==========================================
-client.once('ready', async () => {
-    console.log(`✅ ${client.user.tag} is Online!`);
-    
-    // Load Music Extractors
-    await player.extractors.loadDefault();
+// ====== REGISTER SLASH ======
+async function registerSlashCommands() {
+  const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: slashCommands });
+  console.log("✅ Slash commands registered globally.");
+}
 
-    // Cache Invites
-    client.guilds.cache.forEach(async guild => {
-        try {
-            const invites = await guild.invites.fetch();
-            invites.each(inv => invitesCache.set(inv.code, inv.uses));
-        } catch (e) {}
-    });
+// ====== UTIL ======
+function isOwner(userId) {
+  return String(userId) === String(OWNER_ID);
+}
 
-    // Register Commands
-    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+function safeName(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9\-]/g, "-");
+}
+
+async function ensureRole(guild, name) {
+  const existing = guild.roles.cache.find((r) => r.name === name);
+  if (existing) return existing;
+  return guild.roles.create({ name, reason: "Auto setup role" });
+}
+
+async function ensureChannel(guild, name, type = ChannelType.GuildText) {
+  const existing = guild.channels.cache.find((c) => c.name === name);
+  if (existing) return existing;
+  return guild.channels.create({
+    name,
+    type,
+    reason: "Auto setup channel",
+  });
+}
+
+// ====== SETUP FUNCTION ======
+async function runSetup(guild) {
+  // roles
+  const verifiedRole = await ensureRole(guild, "Verified");
+  const mutedRole = await ensureRole(guild, "Muted");
+  const quarantineRole = await ensureRole(guild, "Quarantine");
+
+  // channels
+  const welcome = await ensureChannel(guild, "welcome");
+  const rules = await ensureChannel(guild, "rules");
+  const verify = await ensureChannel(guild, "verify");
+  const modLogs = await ensureChannel(guild, "mod-logs");
+  const aiChat = await ensureChannel(guild, "ai-chat");
+
+  // lock AI channel to owner only
+  await aiChat.permissionOverwrites.set([
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel],
+    },
+    {
+      id: OWNER_ID,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+      ],
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageChannels,
+      ],
+    },
+  ]);
+
+  // verify button
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("verify_me")
+      .setLabel("✅ Verify")
+      .setStyle(ButtonStyle.Success)
+  );
+
+  const embed = new EmbedBuilder()
+    .setTitle("Verification")
+    .setDescription("Click the button below to get **Verified** role.")
+    .setColor(0x00ff88);
+
+  await verify.send({ embeds: [embed], components: [row] });
+
+  // rules
+  await rules.send(
+    `📌 **Server Rules**
+1) Respect everyone
+2) No spam
+3) No scam links
+4) Follow Discord TOS
+`
+  );
+
+  // welcome
+  await welcome.send("👋 Welcome! Please verify in #verify");
+
+  // log
+  await modLogs.send("✅ Setup complete: channels + roles + verify + ai-chat created.");
+
+  return { verifiedRole, mutedRole, quarantineRole, channels: { welcome, rules, verify, modLogs, aiChat } };
+}
+
+// ====== OWNER CONFIRM SYSTEM ======
+const pendingConfirm = new Map(); // key: ownerId => { action, guildId, expires }
+
+function setPendingConfirm(ownerId, data) {
+  pendingConfirm.set(ownerId, { ...data, expires: Date.now() + 60_000 });
+}
+function getPendingConfirm(ownerId) {
+  const v = pendingConfirm.get(ownerId);
+  if (!v) return null;
+  if (Date.now() > v.expires) {
+    pendingConfirm.delete(ownerId);
+    return null;
+  }
+  return v;
+}
+function clearPendingConfirm(ownerId) {
+  pendingConfirm.delete(ownerId);
+}
+
+// ====== BASIC MOD ACTIONS ======
+async function hideAllChannels(guild) {
+  for (const ch of guild.channels.cache.values()) {
     try {
-        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: slashCommands });
-        console.log('✅ Slash Commands Registered');
-    } catch (error) {
-        console.error(error);
-    }
+      await ch.permissionOverwrites.edit(guild.roles.everyone.id, {
+        ViewChannel: false,
+      });
+    } catch {}
+  }
+}
+async function unhideAllChannels(guild) {
+  for (const ch of guild.channels.cache.values()) {
+    try {
+      await ch.permissionOverwrites.edit(guild.roles.everyone.id, {
+        ViewChannel: null,
+      });
+    } catch {}
+  }
+}
+async function lockServer(guild) {
+  for (const ch of guild.channels.cache.values()) {
+    try {
+      await ch.permissionOverwrites.edit(guild.roles.everyone.id, {
+        SendMessages: false,
+      });
+    } catch {}
+  }
+}
+async function unlockServer(guild) {
+  for (const ch of guild.channels.cache.values()) {
+    try {
+      await ch.permissionOverwrites.edit(guild.roles.everyone.id, {
+        SendMessages: null,
+      });
+    } catch {}
+  }
+}
+
+// ====== EVENTS ======
+client.once("clientReady", async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ==========================================
-// 🤖 6. AI & SYSTEM LOGIC
-// ==========================================
-async function handleAI(message) {
-    if (!process.env.GEMINI_API_KEY) return message.reply("❌ API Key missing.");
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
-    try {
-        const result = await model.generateContent(message.content);
-        const response = result.response.text();
-        if(response.length > 2000) {
-            message.reply(response.substring(0, 1999));
-        } else {
-            message.reply(response);
-        }
-    } catch (error) {
-        console.error("AI Error:", error);
-        message.reply("Brain overload. Try again.");
+client.on("interactionCreate", async (interaction) => {
+  try {
+    // verify button
+    if (interaction.isButton()) {
+      if (interaction.customId === "verify_me") {
+        const role = interaction.guild.roles.cache.find((r) => r.name === "Verified");
+        if (!role) return interaction.reply({ content: "❌ Verified role not found. Run /setup.", ephemeral: true });
+
+        await interaction.member.roles.add(role);
+        return interaction.reply({ content: "✅ You are verified!", ephemeral: true });
+      }
     }
-}
 
-function logAction(guild, title, desc, color = 'Red') {
-    try {
-        const settings = db.prepare('SELECT log_channel FROM settings WHERE guild_id = ?').get(guild.id);
-        if (!settings || !settings.log_channel) return;
-        const channel = guild.channels.cache.get(settings.log_channel);
-        if (channel) {
-            const embed = new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color).setTimestamp();
-            channel.send({ embeds: [embed] }).catch(() => {});
-        }
-    } catch (e) {}
-}
+    // slash commands
+    if (!interaction.isChatInputCommand()) return;
 
-const checkRaid = (guild, type, executorId) => {
-    if (executorId === process.env.OWNER_ID) return false;
-    if (panicMode) return true;
+    if (interaction.commandName === "ping") {
+      return interaction.reply(`🏓 Pong! ${client.ws.ping}ms`);
+    }
 
-    const key = `${guild.id}-${type}-${executorId}`;
-    const now = Date.now();
-    const data = raidCache.get(key) || { count: 0, time: now };
-
-    if (now - data.time > 10000) { 
-        data.count = 1;
-        data.time = now;
+    if (interaction.commandName === "setup") {
+      if (!isOwner(interaction.user.id)) {
+        return interaction.reply({ content: "❌ Only Owner can use this.", ephemeral: true });
+      }
+      await interaction.reply("⚙️ Running setup...");
+      await runSetup(interaction.guild);
+      return interaction.editReply("✅ Setup done!");
+    }
+  } catch (err) {
+    console.error(err);
+    if (interaction.replied || interaction.deferred) {
+      interaction.editReply("❌ Error happened.");
     } else {
-        data.count++;
+      interaction.reply({ content: "❌ Error happened.", ephemeral: true });
     }
-    raidCache.set(key, data);
+  }
+});
 
-    if (data.count > 5) {
-        const member = guild.members.cache.get(executorId);
-        if (member && member.bannable) {
-            member.ban({ reason: 'Anti-Nuke: Rate Limit Exceeded' }).catch(() => {});
-            logAction(guild, '🛡️ RAID DETECTED', `User <@${executorId}> banned for mass ${type}.`);
-        }
-        return true;
-    }
-    return false;
-};
-
-// ==========================================
-// 📨 7. MESSAGE & OWNER COMMANDS
-// ==========================================
-client.on('messageCreate', async (message) => {
+// prefix + no-prefix
+client.on("messageCreate", async (message) => {
+  try {
+    if (!message.guild) return;
     if (message.author.bot) return;
 
-    // Tracker & DB
-    db.prepare('INSERT OR IGNORE INTO users (id) VALUES (?)').run(message.author.id);
-    db.prepare('UPDATE users SET messages = messages + 1 WHERE id = ?').run(message.author.id);
+    const content = message.content.trim();
 
-    // AI Check
-    const settings = db.prepare('SELECT ai_channel FROM settings WHERE guild_id = ?').get(message.guild.id);
-    if (settings && message.channel.id === settings.ai_channel && message.author.id === process.env.OWNER_ID) {
-        await handleAI(message);
-        return;
+    // PREFIX COMMANDS
+    if (content.startsWith(PREFIX)) {
+      const args = content.slice(PREFIX.length).trim().split(/\s+/);
+      const cmd = (args.shift() || "").toLowerCase();
+
+      if (cmd === "ping") return message.reply(`🏓 Pong! ${client.ws.ping}ms`);
+      if (cmd === "help") return message.reply(HELP_TEXT);
+
+      if (cmd === "setup") {
+        if (!isOwner(message.author.id)) return message.reply("❌ Owner only.");
+        await message.reply("⚙️ Running setup...");
+        await runSetup(message.guild);
+        return message.reply("✅ Setup done!");
+      }
+
+      return;
     }
 
-    // Owner No-Prefix
-    if (message.author.id === process.env.OWNER_ID) {
-        const content = message.content.toLowerCase();
-        
-        // Confirmation
-        if (confirmationCache.has(message.author.id)) {
-            if (content === 'yes') {
-                const action = confirmationCache.get(message.author.id);
-                confirmationCache.delete(message.author.id);
-                await action();
-                return message.reply("✅ Executed.");
-            } else {
-                confirmationCache.delete(message.author.id);
-                return message.reply("❌ Cancelled.");
-            }
+    // OWNER NO-PREFIX ONLY IN #ai-chat
+    const aiChannel = message.guild.channels.cache.find((c) => c.name === "ai-chat");
+    const isInAI = aiChannel && message.channel.id === aiChannel.id;
+
+    if (isInAI && isOwner(message.author.id)) {
+      // confirm flow
+      const pending = getPendingConfirm(message.author.id);
+      if (pending && content.toUpperCase() === "YES") {
+        const guild = client.guilds.cache.get(pending.guildId);
+        if (!guild) {
+          clearPendingConfirm(message.author.id);
+          return message.reply("❌ Guild not found.");
         }
 
-        if (content === 'panic mode on') {
-            panicMode = true;
-            message.guild.channels.cache.forEach(c => c.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: false }).catch(() => {}));
-            message.reply("🚨 **PANIC MODE: SERVER LOCKED**");
+        if (pending.action === "HIDE_ALL") {
+          await message.reply("⏳ Hiding all channels...");
+          await hideAllChannels(guild);
+          clearPendingConfirm(message.author.id);
+          return message.reply("✅ Done. All channels hidden for @everyone.");
         }
-        else if (content === 'panic mode off') {
-            panicMode = false;
-            message.reply("✅ Panic Mode Disabled.");
+
+        if (pending.action === "UNHIDE_ALL") {
+          await message.reply("⏳ Unhiding all channels...");
+          await unhideAllChannels(guild);
+          clearPendingConfirm(message.author.id);
+          return message.reply("✅ Done. All channels unhidden.");
         }
-        else if (content === 'delete all empty channels') {
-            message.reply("⚠️ **Confirm? Type YES.**");
-            confirmationCache.set(message.author.id, async () => {
-                message.guild.channels.cache.filter(c => c.type === ChannelType.GuildVoice && c.members.size === 0).forEach(c => c.delete().catch(()=> {}));
-            });
+
+        if (pending.action === "LOCK") {
+          await message.reply("⏳ Locking server...");
+          await lockServer(guild);
+          clearPendingConfirm(message.author.id);
+          return message.reply("✅ Server locked.");
         }
-        else if (content === 'setup') {
-            const guild = message.guild;
-            const everyone = guild.roles.everyone;
-            const modLog = await guild.channels.create({ name: 'mod-logs', type: ChannelType.GuildText, permissionOverwrites: [{ id: everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] }] });
-            const aiChat = await guild.channels.create({ name: 'ai-chat', type: ChannelType.GuildText, permissionOverwrites: [{ id: everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] }, { id: message.author.id, allow: [PermissionsBitField.Flags.ViewChannel] }] });
-            const welcome = await guild.channels.create({ name: 'welcome', type: ChannelType.GuildText });
-            db.prepare('INSERT OR REPLACE INTO settings (guild_id, log_channel, welcome_channel, ai_channel) VALUES (?, ?, ?, ?)').run(guild.id, modLog.id, welcome.id, aiChat.id);
-            message.reply("✅ **Setup Complete!**");
+
+        if (pending.action === "UNLOCK") {
+          await message.reply("⏳ Unlocking server...");
+          await unlockServer(guild);
+          clearPendingConfirm(message.author.id);
+          return message.reply("✅ Server unlocked.");
         }
+
+        clearPendingConfirm(message.author.id);
+        return message.reply("✅ Confirmed.");
+      }
+
+      // owner AI admin intent
+      const text = content.toLowerCase();
+
+      // quick commands
+      if (text === "help" || text === "cmd" || text === "commands") {
+        return message.reply(HELP_TEXT);
+      }
+
+      if (text.includes("hide all channels")) {
+        setPendingConfirm(message.author.id, { action: "HIDE_ALL", guildId: message.guild.id });
+        return message.reply("⚠️ Confirm? Type **YES** to proceed (60s).");
+      }
+
+      if (text.includes("unhide all channels") || text.includes("show all channels")) {
+        setPendingConfirm(message.author.id, { action: "UNHIDE_ALL", guildId: message.guild.id });
+        return message.reply("⚠️ Confirm? Type **YES** to proceed (60s).");
+      }
+
+      if (text === "lock server" || text.includes("lockdown")) {
+        setPendingConfirm(message.author.id, { action: "LOCK", guildId: message.guild.id });
+        return message.reply("⚠️ Confirm? Type **YES** to proceed (60s).");
+      }
+
+      if (text === "unlock server") {
+        setPendingConfirm(message.author.id, { action: "UNLOCK", guildId: message.guild.id });
+        return message.reply("⚠️ Confirm? Type **YES** to proceed (60s).");
+      }
+
+      if (text.includes("setup") && text.includes("verification")) {
+        await message.reply("⚙️ Running setup...");
+        await runSetup(message.guild);
+        return message.reply("✅ Setup done!");
+      }
+
+      // AI Chat fallback
+      const prompt = `You are a helpful Discord server assistant.
+User message: ${content}
+Reply short and helpful.`;
+
+      const aiReply = await askGemini(prompt);
+      return message.reply(aiReply.slice(0, 1900));
     }
+  } catch (err) {
+    console.error("messageCreate error:", err);
+  }
 });
 
-// ==========================================
-// 🎮 8. INTERACTION HANDLER
-// ==========================================
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    const { commandName, options } = interaction;
-
-    if (commandName === '8ball') {
-        const replies = ["Yes.", "No.", "Try later."];
-        await interaction.reply(`🎱 **${replies[Math.floor(Math.random() * replies.length)]}**`);
-    }
-    if (commandName === 'invites') {
-        const user = options.getUser('user') || interaction.user;
-        const row = db.prepare('SELECT invites FROM users WHERE id = ?').get(user.id);
-        await interaction.reply(`📈 **${user.username}** has **${row ? row.invites : 0}** invites.`);
-    }
-    if (commandName === 'play') {
-        if (!interaction.member.voice.channel) return interaction.reply("❌ Join VC first!");
-        await interaction.deferReply();
-        try {
-            await player.play(interaction.member.voice.channel, options.getString('query'), {
-                nodeOptions: { metadata: { channel: interaction.channel } }
-            });
-            await interaction.editReply("🎵 Processing...");
-        } catch (e) {
-            await interaction.editReply(`❌ Error: ${e.message}`);
-        }
-    }
-    if (commandName === 'stop') {
-        const queue = player.nodes.get(interaction.guild);
-        if(queue) queue.delete();
-        await interaction.reply("⏹️ Stopped.");
-    }
-    if (commandName === 'ban') {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return interaction.reply("❌ No perm.");
-        const user = options.getUser('user');
-        await interaction.guild.members.ban(user);
-        await interaction.reply(`🔨 Banned ${user.tag}`);
-        logAction(interaction.guild, 'User Banned', `Target: ${user.tag}`);
-    }
-});
-
-// ==========================================
-// 🕵️ 9. EVENTS (INVITES + ANTI-NUKE)
-// ==========================================
-client.on('guildMemberAdd', async member => {
-    const newInvites = await member.guild.invites.fetch();
-    const usedInvite = newInvites.find(inv => inv.uses > (invitesCache.get(inv.code) || 0));
-    if (usedInvite) {
-        invitesCache.set(usedInvite.code, usedInvite.uses);
-        db.prepare('INSERT OR IGNORE INTO users (id) VALUES (?)').run(usedInvite.inviter.id);
-        db.prepare('UPDATE users SET invites = invites + 1 WHERE id = ?').run(usedInvite.inviter.id);
-        const settings = db.prepare('SELECT welcome_channel FROM settings WHERE guild_id = ?').get(member.guild.id);
-        if (settings && settings.welcome_channel) {
-            const channel = member.guild.channels.cache.get(settings.welcome_channel);
+// ====== START ======
+(async () => {
+  try {
+    await registerSlashCommands();
+    await client.login(DISCORD_TOKEN);
+  } catch (e) {
+    console.error("Startup error:", e);
+  }
+})();
