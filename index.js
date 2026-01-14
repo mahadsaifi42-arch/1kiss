@@ -632,3 +632,4 @@ client.on("messageCreate", async (message) => {
       const user = getMentionedUser(message);
       if (!user) {
         const emb = xlare(`${EMOJI.no} Invalid User`, `You didn't provide a valid user.
+        client.login(DISCORD_TOKEN);
