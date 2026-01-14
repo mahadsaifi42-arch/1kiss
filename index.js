@@ -1,3 +1,10 @@
+/**
+ * Questy Final MultiBot - index.js
+ * Prefix: from env PREFIX (default $)
+ * Whitelist users can run commands WITHOUT prefix:
+ * ban, unban, mute, unmute, lock, unlock, purge, afk
+ */
+
 require("dotenv").config();
 const express = require("express");
 const {
@@ -5,450 +12,625 @@ const {
   GatewayIntentBits,
   Partials,
   PermissionsBitField,
+  EmbedBuilder,
 } = require("discord.js");
-const Database = require("better-sqlite3");
 
-// ================== CONFIG ==================
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+if (!DISCORD_TOKEN) throw new Error("❌ Missing DISCORD_TOKEN in env");
+
 const PREFIX = process.env.PREFIX || "$";
 const PORT = process.env.PORT || 10000;
 
-const EMOJIS = {
-  tick: "<a:TICK_TICK:1214893859151286272>",
-  wrong: "<a:4NDS_wrong:1458407390419615756>",
+// ====== Emojis (Your IDs) ======
+const EMOJI = {
+  ok: "<a:TICK_TICK:1214893859151286272>",
+  no: "<a:4NDS_wrong:1458407390419615756>",
   lock: "<a:lock_keyggchillhaven:1307838252568412202>",
   music: "<a:Music:1438190819512422447>",
   headphones: "<:0041_headphones:1443333046823813151>",
-  question: "<a:question:1264568031019925545>",
+  q: "<a:question:1264568031019925545>",
 };
 
-// ================== WEB SERVER (Render Port Fix) ==================
-const app = express();
-app.get("/", (req, res) => res.send("Questy Final MultiBot Running ✅"));
-app.listen(PORT, () => console.log(`🌐 Web alive on port ${PORT}`));
+// ====== Simple In-Memory DB (resets on restart) ======
+const whitelist = {
+  // userId: { ban:true, mute:true, lock:true, unlock:true, purge:true, prefixless:true }
+};
+const afkMap = new Map(); // userId -> { reason, since }
 
-// ================== CLIENT ==================
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.MessageContent,
-  ],
-  partials: [Partials.Channel],
-});
-
-if (!process.env.DISCORD_TOKEN) {
-  throw new Error("❌ Missing DISCORD_TOKEN in env");
+function now() {
+  return Date.now();
 }
 
-// ================== DATABASE ==================
-const db = new Database("data.db");
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
 
-// tables
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS whitelist (
-    guildId TEXT NOT NULL,
-    userId TEXT NOT NULL,
-    perm TEXT NOT NULL,
-    PRIMARY KEY (guildId, userId, perm)
-  )`
-).run();
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
 
-db.prepare(
-  `CREATE TABLE IF NOT EXISTS afk (
-    guildId TEXT NOT NULL,
-    userId TEXT NOT NULL,
-    reason TEXT,
-    since INTEGER NOT NULL,
-    PRIMARY KEY (guildId, userId)
-  )`
-).run();
+function xlareEmbed(type, title, desc) {
+  const color =
+    type === "ok" ? 0x2ecc71 : type === "warn" ? 0xf1c40f : 0xe74c3c;
+
+  return new EmbedBuilder()
+    .setColor(color)
+    .setDescription(desc)
+    .setFooter({ text: title || "1Love" });
+}
+
+function getUserWL(userId) {
+  return whitelist[userId] || {};
+}
+
+function isOwner(member) {
+  return member?.id === member?.guild?.ownerId;
+}
 
 function isAdmin(member) {
-  return member.permissions.has(PermissionsBitField.Flags.Administrator);
-}
-
-function hasWL(guildId, userId, perm) {
-  const row = db
-    .prepare(
-      "SELECT 1 FROM whitelist WHERE guildId=? AND userId=? AND perm=? LIMIT 1"
-    )
-    .get(guildId, userId, perm);
-  return !!row;
-}
-
-function addWL(guildId, userId, perm) {
-  db.prepare(
-    "INSERT OR IGNORE INTO whitelist (guildId, userId, perm) VALUES (?,?,?)"
-  ).run(guildId, userId, perm);
-}
-
-function delWL(guildId, userId, perm) {
-  db.prepare("DELETE FROM whitelist WHERE guildId=? AND userId=? AND perm=?").run(
-    guildId,
-    userId,
-    perm
+  return (
+    member?.permissions?.has(PermissionsBitField.Flags.Administrator) ||
+    isOwner(member)
   );
 }
 
-function listWL(guildId, userId) {
-  return db
-    .prepare("SELECT perm FROM whitelist WHERE guildId=? AND userId=?")
-    .all(guildId, userId)
-    .map((x) => x.perm);
+function hasWL(member, permKey) {
+  if (!member) return false;
+  if (isAdmin(member)) return true; // Admin/Owner always allowed
+  const wl = getUserWL(member.id);
+  return wl?.[permKey] === true;
 }
 
-function formatSince(ms) {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s} seconds ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} minutes ago`;
-  const h = Math.floor(m / 60);
-  return `${h} hours ago`;
-}
-
-// ================== HELP TEXT ==================
-const HELP_TEXT = `
-${EMOJIS.question} **Commands**
-**Prefix:** \`${PREFIX}\`
-
-**Public (Everyone)**
-• \`${PREFIX}help\`
-• \`${PREFIX}ping\`
-• \`afk [reason]\` (prefixless for all)
-
-**Admin Only**
-• \`${PREFIX}wl add @user <ban|mute|prefixless|advertise|spam|purge|lock>\`
-• \`${PREFIX}wl remove @user <perm>\`
-• \`${PREFIX}wl list @user\`
-
-**Mod Commands**
-• \`${PREFIX}lock\` / \`${PREFIX}unlock\`
-• \`${PREFIX}ban @user [reason]\`
-• \`${PREFIX}unban <userId>\`
-• \`${PREFIX}mute @user [minutes]\`
-• \`${PREFIX}unmute @user\`
-• \`${PREFIX}purge <amount>\`
-
-**Prefixless Access**
-Only whitelisted users can run these without prefix.
-`;
-
-// ================== COMMAND PARSER ==================
-function parseArgs(content) {
-  const parts = content.trim().split(/\s+/);
-  const cmd = parts.shift()?.toLowerCase();
-  return { cmd, args: parts };
-}
-
-function isCommandMessage(msg) {
-  if (!msg.content) return false;
-  const c = msg.content.trim().toLowerCase();
-  if (c.startsWith(PREFIX)) return true;
-  // prefixless AFK for all
-  if (c === "afk" || c.startsWith("afk ")) return true;
-  return false;
-}
-
-// ================== READY ==================
-client.once("ready", () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+// ====== Discord Client ======
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
+  partials: [Partials.Channel, Partials.Message, Partials.User],
 });
 
-// ================== MESSAGE HANDLER ==================
+// ====== Render Keep Alive ======
+const app = express();
+app.get("/", (req, res) => res.send("1Love Bot is running ✅"));
+app.listen(PORT, () => console.log(`🌐 Web alive on port ${PORT}`));
+
+// ====== Command Helpers ======
+function parseArgs(content) {
+  return content.trim().split(/\s+/);
+}
+
+function cleanMentionToId(str) {
+  if (!str) return null;
+  const m = str.match(/^<@!?(\d+)>$/);
+  if (m) return m[1];
+  if (/^\d+$/.test(str)) return str;
+  return null;
+}
+
+async function safeReply(message, embed) {
+  try {
+    return await message.reply({ embeds: [embed] });
+  } catch {
+    try {
+      return await message.channel.send({ embeds: [embed] });
+    } catch {}
+  }
+}
+
+// ====== Core Actions ======
+async function doLock(channel) {
+  await channel.permissionOverwrites.edit(channel.guild.roles.everyone, {
+    SendMessages: false,
+  });
+}
+
+async function doUnlock(channel) {
+  await channel.permissionOverwrites.edit(channel.guild.roles.everyone, {
+    SendMessages: null,
+  });
+}
+
+// ====== Message Handler ======
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
     if (message.author.bot) return;
 
-    // ---------------- AFK remove when user speaks ----------------
-    const afkRow = db
-      .prepare("SELECT * FROM afk WHERE guildId=? AND userId=?")
-      .get(message.guild.id, message.author.id);
+    const member = message.member;
 
-    if (afkRow) {
-      // if user sends anything (except setting afk again) => remove
-      const lower = message.content.trim().toLowerCase();
-      if (!(lower === "afk" || lower.startsWith("afk "))) {
-        db.prepare("DELETE FROM afk WHERE guildId=? AND userId=?").run(
-          message.guild.id,
-          message.author.id
-        );
-        await message.reply(
-          `${EMOJIS.tick} Welcome back! I removed your afk. You were afk since ${formatSince(
-            Date.now() - afkRow.since
-          )}`
-        );
-      }
+    // ---- AFK remove when user sends message (only if they were AFK) ----
+    if (afkMap.has(message.author.id)) {
+      afkMap.delete(message.author.id);
+      const emb = xlareEmbed(
+        "ok",
+        "AFK Removed",
+        `${EMOJI.ok} Welcome back! I removed your afk.`
+      );
+      await safeReply(message, emb);
+      // continue, but don't block command processing
     }
 
-    // ---------------- AFK mention reply ----------------
+    // ---- AFK notify when someone mentions AFK user ----
     if (message.mentions.users.size > 0) {
-      for (const [, user] of message.mentions.users) {
-        const row = db
-          .prepare("SELECT * FROM afk WHERE guildId=? AND userId=?")
-          .get(message.guild.id, user.id);
-
-        if (row) {
-          await message.reply(
-            `😴 ${user.username} is AFK: **${row.reason || "AFK"}** • (${formatSince(
-              Date.now() - row.since
-            )})`
+      for (const [id] of message.mentions.users) {
+        if (afkMap.has(id)) {
+          const afk = afkMap.get(id);
+          const since = formatDuration(now() - afk.since);
+          const emb = xlareEmbed(
+            "warn",
+            "AFK",
+            `${EMOJI.q} <@${id}> is AFK\n**Reason:** ${afk.reason}\n**Since:** ${since} ago`
           );
+          await safeReply(message, emb);
           break;
         }
       }
     }
 
-    // ---------------- Ignore normal chat ----------------
-    if (!isCommandMessage(message)) return;
+    // ====== Determine if it's a command ======
+    const content = message.content.trim();
 
-    // ---------------- Parse command ----------------
-    let content = message.content.trim();
+    const isPrefixed = content.startsWith(PREFIX);
+    const lower = content.toLowerCase();
 
-    // prefix commands
-    let usedPrefix = false;
-    if (content.startsWith(PREFIX)) {
-      usedPrefix = true;
-      content = content.slice(PREFIX.length).trim();
+    // without prefix command allowed list
+    const noPrefixCommands = [
+      "ban",
+      "unban",
+      "mute",
+      "unmute",
+      "lock",
+      "unlock",
+      "purge",
+      "afk",
+      "wl",
+      "help",
+      "ping",
+    ];
+
+    let cmdText = null;
+
+    if (isPrefixed) {
+      cmdText = content.slice(PREFIX.length).trim();
+    } else {
+      // only allow without prefix if user is whitelisted (prefixless) OR admin
+      const firstWord = parseArgs(content)[0]?.toLowerCase();
+      if (
+        noPrefixCommands.includes(firstWord) &&
+        (hasWL(member, "prefixless") || isAdmin(member))
+      ) {
+        cmdText = content;
+      } else {
+        // IMPORTANT: no reply on normal messages
+        return;
+      }
     }
 
-    const { cmd, args } = parseArgs(content);
-    if (!cmd) return;
+    if (!cmdText) return;
 
-    // ---------------- AFK SET (prefixless for all) ----------------
-    if (cmd === "afk") {
-      const reason = args.join(" ").trim() || "AFK";
-      db.prepare(
-        "INSERT OR REPLACE INTO afk (guildId, userId, reason, since) VALUES (?,?,?,?)"
-      ).run(message.guild.id, message.author.id, reason, Date.now());
+    const parts = parseArgs(cmdText);
+    const cmd = parts.shift()?.toLowerCase();
 
-      await message.reply(
-        `${EMOJIS.tick} Your now set afk with status- **${reason || "None"}**`
-      );
-      return;
-    }
+    // ====== Commands ======
 
-    // ---------------- Public Commands ----------------
+    // PING
     if (cmd === "ping") {
-      await message.reply(`${EMOJIS.tick} Pong! ${client.ws.ping}ms`);
-      return;
-    }
-
-    if (cmd === "help") {
-      await message.reply(HELP_TEXT);
-      return;
-    }
-
-    // ---------------- Admin WL Commands ----------------
-    if (cmd === "wl") {
-      if (!isAdmin(message.member)) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
-        );
-      }
-
-      const action = args[0]?.toLowerCase();
-      const target = message.mentions.users.first();
-      const perm = args[2]?.toLowerCase();
-
-      const validPerms = [
-        "ban",
-        "mute",
-        "prefixless",
-        "advertise",
-        "spam",
-        "purge",
-        "lock",
-      ];
-
-      if (!action || !["add", "remove", "list"].includes(action)) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} Use: \`${PREFIX}wl add @user <perm>\``
-        );
-      }
-
-      if (action === "list") {
-        if (!target) {
-          return message.reply(
-            `${EMOJIS.wrong} ${message.author} You didn't provide a valid user`
-          );
-        }
-        const perms = listWL(message.guild.id, target.id);
-        if (perms.length === 0) {
-          return message.reply(
-            `${EMOJIS.question} ${target.username} has no whitelist perms`
-          );
-        }
-        return message.reply(
-          `${EMOJIS.tick} ${target.username} WL: \`${perms.join(", ")}\``
-        );
-      }
-
-      if (!target || !perm || !validPerms.includes(perm)) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} Valid perms: \`${validPerms.join(
-            ", "
-          )}\``
-        );
-      }
-
-      if (action === "add") {
-        addWL(message.guild.id, target.id, perm);
-        return message.reply(
-          `${EMOJIS.tick} Added **${perm}** whitelist to ${target}`
-        );
-      }
-
-      if (action === "remove") {
-        delWL(message.guild.id, target.id, perm);
-        return message.reply(
-          `${EMOJIS.tick} Removed **${perm}** whitelist from ${target}`
-        );
-      }
-    }
-
-    // ---------------- MOD COMMANDS (Prefix OR Whitelisted Prefixless) ----------------
-    // Prefixless allow only if user has prefixless WL
-    const prefixlessAllowed = hasWL(
-      message.guild.id,
-      message.author.id,
-      "prefixless"
-    );
-
-    // if not used prefix and not prefixlessAllowed => ignore
-    if (!usedPrefix && !prefixlessAllowed) return;
-
-    // ===== lock/unlock =====
-    if (cmd === "lock" || cmd === "unlock") {
-      // require admin OR lock WL
-      if (!isAdmin(message.member) && !hasWL(message.guild.id, message.author.id, "lock")) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
-        );
-      }
-
-      const channel = message.channel;
-      const everyoneRole = message.guild.roles.everyone;
-
-      const lockIt = cmd === "lock";
-
-      await channel.permissionOverwrites.edit(everyoneRole, {
-        SendMessages: lockIt ? false : null,
-      });
-
-      return message.reply(
-        lockIt
-          ? `${EMOJIS.lock} Channel locked`
-          : `${EMOJIS.tick} Channel unlocked`
+      const emb = xlareEmbed(
+        "ok",
+        "Ping",
+        `${EMOJI.ok} Pong! **${client.ws.ping}ms**`
       );
+      return safeReply(message, emb);
     }
 
-    // ===== purge =====
-    if (cmd === "purge") {
-      if (!isAdmin(message.member) && !hasWL(message.guild.id, message.author.id, "purge")) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
-        );
-      }
-
-      const amount = parseInt(args[0], 10);
-      if (!amount || amount < 1 || amount > 100) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} Use: \`${PREFIX}purge 1-100\``
-        );
-      }
-
-      await message.channel.bulkDelete(amount, true);
-      return message.reply(`${EMOJIS.tick} Purged **${amount}** messages`);
+    // HELP
+    if (cmd === "help") {
+      const emb = xlareEmbed(
+        "ok",
+        "Help",
+        `${EMOJI.ok} **Commands**\n` +
+          `\`${PREFIX}ping\`\n` +
+          `\`${PREFIX}lock\` / \`${PREFIX}unlock\`\n` +
+          `\`${PREFIX}ban @user [reason]\`\n` +
+          `\`${PREFIX}mute @user [minutes]\`\n` +
+          `\`${PREFIX}unmute @user\`\n` +
+          `\`${PREFIX}purge <count>\`\n` +
+          `\`${PREFIX}afk [reason]\`\n\n` +
+          `**Whitelist (Admin only):**\n` +
+          `\`${PREFIX}wl add @user <ban|mute|lock|unlock|purge|prefixless>\`\n` +
+          `\`${PREFIX}wl remove @user <perm>\`\n` +
+          `\`${PREFIX}wl list @user\``
+      );
+      return safeReply(message, emb);
     }
 
-    // ===== ban =====
+    // WHITELIST
+    if (cmd === "wl") {
+      if (!isAdmin(member)) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} Only **Admins/Owner** can manage whitelist.`
+        );
+        return safeReply(message, emb);
+      }
+
+      const sub = (parts.shift() || "").toLowerCase();
+      const userArg = parts.shift();
+      const perm = (parts.shift() || "").toLowerCase();
+
+      const userId = cleanMentionToId(userArg);
+      if (!sub || !userId) {
+        const emb = xlareEmbed(
+          "warn",
+          "Whitelist",
+          `${EMOJI.q} Usage:\n` +
+            `\`${PREFIX}wl add @user ban\`\n` +
+            `\`${PREFIX}wl remove @user ban\`\n` +
+            `\`${PREFIX}wl list @user\`\n\n` +
+            `Perms: ban, mute, lock, unlock, purge, prefixless`
+        );
+        return safeReply(message, emb);
+      }
+
+      whitelist[userId] = whitelist[userId] || {};
+
+      if (sub === "add") {
+        if (!perm) {
+          const emb = xlareEmbed(
+            "warn",
+            "Whitelist",
+            `${EMOJI.q} Choose a permission:\n**ban / mute / lock / unlock / purge / prefixless**`
+          );
+          return safeReply(message, emb);
+        }
+        whitelist[userId][perm] = true;
+
+        const emb = xlareEmbed(
+          "ok",
+          "Whitelist Added",
+          `${EMOJI.ok} Added **${perm}** whitelist for <@${userId}>`
+        );
+        return safeReply(message, emb);
+      }
+
+      if (sub === "remove") {
+        if (!perm) {
+          const emb = xlareEmbed(
+            "warn",
+            "Whitelist",
+            `${EMOJI.q} Choose a permission to remove.`
+          );
+          return safeReply(message, emb);
+        }
+        whitelist[userId][perm] = false;
+
+        const emb = xlareEmbed(
+          "ok",
+          "Whitelist Removed",
+          `${EMOJI.ok} Removed **${perm}** whitelist for <@${userId}>`
+        );
+        return safeReply(message, emb);
+      }
+
+      if (sub === "list") {
+        const wl = getUserWL(userId);
+        const list = Object.keys(wl)
+          .filter((k) => wl[k] === true)
+          .map((k) => `• ${k}`)
+          .join("\n");
+
+        const emb = xlareEmbed(
+          "ok",
+          "Whitelist List",
+          `${EMOJI.ok} <@${userId}> whitelist:\n${list || "• none"}`
+        );
+        return safeReply(message, emb);
+      }
+
+      const emb = xlareEmbed(
+        "warn",
+        "Whitelist",
+        `${EMOJI.q} Unknown subcommand. Use \`${PREFIX}wl add/remove/list\``
+      );
+      return safeReply(message, emb);
+    }
+
+    // LOCK
+    if (cmd === "lock") {
+      if (!hasWL(member, "lock")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **lock**.`
+        );
+        return safeReply(message, emb);
+      }
+
+      await doLock(message.channel);
+      const emb = xlareEmbed(
+        "ok",
+        "Locked",
+        `${EMOJI.lock} Channel locked successfully.`
+      );
+      return safeReply(message, emb);
+    }
+
+    // UNLOCK
+    if (cmd === "unlock") {
+      if (!hasWL(member, "unlock")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **unlock**.`
+        );
+        return safeReply(message, emb);
+      }
+
+      await doUnlock(message.channel);
+      const emb = xlareEmbed(
+        "ok",
+        "Unlocked",
+        `${EMOJI.ok} Channel unlocked successfully.`
+      );
+      return safeReply(message, emb);
+    }
+
+    // BAN
     if (cmd === "ban") {
-      if (!isAdmin(message.member) && !hasWL(message.guild.id, message.author.id, "ban")) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
+      if (!hasWL(member, "ban")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **ban**.`
         );
+        return safeReply(message, emb);
       }
 
-      const target = message.mentions.members.first();
-      if (!target) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You didn't provide a valid user`
+      const targetArg = parts.shift();
+      const targetId = cleanMentionToId(targetArg);
+
+      if (!targetId) {
+        const emb = xlareEmbed(
+          "err",
+          "Invalid User",
+          `${EMOJI.no} You didn't provide a valid user`
         );
+        return safeReply(message, emb);
       }
 
-      const reason = args.slice(1).join(" ") || "No reason";
-      await target.ban({ reason });
-      return message.reply(`${EMOJIS.tick} Banned ${target.user.tag}`);
+      const reason = parts.join(" ") || "No reason";
+
+      try {
+        await message.guild.members.ban(targetId, { reason });
+        const emb = xlareEmbed(
+          "ok",
+          "Banned",
+          `${EMOJI.ok} <@${targetId}> has been banned.\n**Reason:** ${reason}`
+        );
+        return safeReply(message, emb);
+      } catch (e) {
+        const emb = xlareEmbed(
+          "err",
+          "Ban Failed",
+          `${EMOJI.no} I couldn't ban that user.`
+        );
+        return safeReply(message, emb);
+      }
     }
 
-    // ===== unban =====
+    // UNBAN
     if (cmd === "unban") {
-      if (!isAdmin(message.member) && !hasWL(message.guild.id, message.author.id, "ban")) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
+      if (!hasWL(member, "ban")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **unban**.`
         );
+        return safeReply(message, emb);
       }
 
-      const userId = args[0];
-      if (!userId || isNaN(userId)) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} Use: \`${PREFIX}unban <userId>\``
+      const id = parts.shift();
+      if (!id || !/^\d+$/.test(id)) {
+        const emb = xlareEmbed(
+          "err",
+          "Invalid User",
+          `${EMOJI.no} Provide a valid user ID`
         );
+        return safeReply(message, emb);
       }
 
-      await message.guild.members.unban(userId);
-      return message.reply(`${EMOJIS.tick} Unbanned **${userId}**`);
+      try {
+        await message.guild.members.unban(id);
+        const emb = xlareEmbed(
+          "ok",
+          "Unbanned",
+          `${EMOJI.ok} Unbanned **${id}**`
+        );
+        return safeReply(message, emb);
+      } catch {
+        const emb = xlareEmbed(
+          "err",
+          "Unban Failed",
+          `${EMOJI.no} Couldn't unban that ID`
+        );
+        return safeReply(message, emb);
+      }
     }
 
-    // ===== mute/unmute (timeout) =====
+    // MUTE (timeout)
     if (cmd === "mute") {
-      if (!isAdmin(message.member) && !hasWL(message.guild.id, message.author.id, "mute")) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
+      if (!hasWL(member, "mute")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **mute**.`
         );
+        return safeReply(message, emb);
       }
 
-      const target = message.mentions.members.first();
-      if (!target) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You didn't provide a valid user`
+      const targetArg = parts.shift();
+      const targetId = cleanMentionToId(targetArg);
+
+      if (!targetId) {
+        const emb = xlareEmbed(
+          "err",
+          "Invalid User",
+          `${EMOJI.no} You didn't provide a valid user`
         );
+        return safeReply(message, emb);
       }
 
-      const minutes = parseInt(args[1] || "10", 10);
-      const ms = minutes * 60 * 1000;
+      const minutes = parseInt(parts.shift() || "10", 10);
+      const ms = Math.max(1, minutes) * 60 * 1000;
 
-      await target.timeout(ms, "Muted");
-      return message.reply(`${EMOJIS.tick} Muted ${target.user.tag} for ${minutes}m`);
+      try {
+        const targetMember = await message.guild.members.fetch(targetId);
+        await targetMember.timeout(ms, `Muted by ${message.author.tag}`);
+
+        const emb = xlareEmbed(
+          "ok",
+          "Muted",
+          `${EMOJI.ok} Muted <@${targetId}> for **${minutes}m**`
+        );
+        return safeReply(message, emb);
+      } catch {
+        const emb = xlareEmbed(
+          "err",
+          "Mute Failed",
+          `${EMOJI.no} I couldn't mute that user.`
+        );
+        return safeReply(message, emb);
+      }
     }
 
+    // UNMUTE
     if (cmd === "unmute") {
-      if (!isAdmin(message.member) && !hasWL(message.guild.id, message.author.id, "mute")) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You don't have permission`
+      if (!hasWL(member, "mute")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **unmute**.`
         );
+        return safeReply(message, emb);
       }
 
-      const target = message.mentions.members.first();
-      if (!target) {
-        return message.reply(
-          `${EMOJIS.wrong} ${message.author} You didn't provide a valid user`
+      const targetArg = parts.shift();
+      const targetId = cleanMentionToId(targetArg);
+
+      if (!targetId) {
+        const emb = xlareEmbed(
+          "err",
+          "Invalid User",
+          `${EMOJI.no} You didn't provide a valid user`
         );
+        return safeReply(message, emb);
       }
 
-      await target.timeout(null);
-      return message.reply(`${EMOJIS.tick} Unmuted ${target.user.tag}`);
+      try {
+        const targetMember = await message.guild.members.fetch(targetId);
+        await targetMember.timeout(null);
+
+        const emb = xlareEmbed(
+          "ok",
+          "Unmuted",
+          `${EMOJI.ok} Unmuted <@${targetId}>`
+        );
+        return safeReply(message, emb);
+      } catch {
+        const emb = xlareEmbed(
+          "err",
+          "Unmute Failed",
+          `${EMOJI.no} I couldn't unmute that user.`
+        );
+        return safeReply(message, emb);
+      }
     }
 
-    // Unknown command: ignore silently (NO SPAM)
-    return;
+    // PURGE
+    if (cmd === "purge") {
+      if (!hasWL(member, "purge")) {
+        const emb = xlareEmbed(
+          "err",
+          "No Permission",
+          `${EMOJI.no} You are not whitelisted for **purge**.`
+        );
+        return safeReply(message, emb);
+      }
+
+      const count = parseInt(parts.shift() || "0", 10);
+      if (!count || count < 1 || count > 100) {
+        const emb = xlareEmbed(
+          "warn",
+          "Purge",
+          `${EMOJI.q} Usage: \`${PREFIX}purge 1-100\``
+        );
+        return safeReply(message, emb);
+      }
+
+      try {
+        await message.channel.bulkDelete(count, true);
+        const emb = xlareEmbed(
+          "ok",
+          "Purged",
+          `${EMOJI.ok} Deleted **${count}** messages.`
+        );
+        const msg = await safeReply(message, emb);
+        setTimeout(() => msg?.delete().catch(() => {}), 3000);
+      } catch {
+        const emb = xlareEmbed(
+          "err",
+          "Purge Failed",
+          `${EMOJI.no} Couldn't delete messages.`
+        );
+        return safeReply(message, emb);
+      }
+    }
+
+    // AFK
+    if (cmd === "afk") {
+      // without prefix allowed only if prefixless wl or admin
+      // with prefix allowed for everyone
+      const isWithoutPrefix = !isPrefixed;
+      if (isWithoutPrefix && !(hasWL(member, "prefixless") || isAdmin(member))) {
+        return;
+      }
+
+      const reason = parts.join(" ") || "AFK";
+      afkMap.set(message.author.id, { reason, since: now() });
+
+      const emb = xlareEmbed(
+        "ok",
+        "AFK Enabled",
+        `${EMOJI.ok} You're now set afk with status- **${reason}**`
+      );
+      return safeReply(message, emb);
+    }
+
+    // Unknown command -> ONLY if prefixed (so normal msgs won't trigger)
+    if (isPrefixed) {
+      const emb = xlareEmbed(
+        "err",
+        "Unknown",
+        `${EMOJI.no} Unknown command. Use \`${PREFIX}help\``
+      );
+      return safeReply(message, emb);
+    }
   } catch (err) {
-    console.log("messageCreate error:", err);
+    console.log("messageCreate error:", err?.message || err);
   }
 });
 
-// ================== LOGIN ==================
-client.login(process.env.DISCORD_TOKEN);
+// ====== Ready ======
+client.once("ready", () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`Prefix: ${PREFIX}`);
+});
+
+client.login(DISCORD_TOKEN);
