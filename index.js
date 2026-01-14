@@ -1,16 +1,21 @@
 /**
- * Questy Final MultiBot - One File
- * Prefix: $ (normal users)
- * Whitelist users: can use commands WITHOUT prefix
- * Features:
- * - ban, unban
- * - mute, unmute
- * - lock, unlock
- * - purge
- * - whitelist system (ban/mute/prefixless/spam/advertise)
- * - AFK (no auto replies on normal messages)
- * - Embeds: Black Color
+ * 1Love MultiBot (Xlare Style) - One File
+ * - Prefix commands for everyone: $
+ * - Prefixless commands only for WL users
+ * - Black embeds + custom emojis
+ * - Welcome/Leave + AutoRole
+ * - AutoReply + AutoReaction
+ * - Reaction Roles (Buttons)
+ * - VC join/leave logs
+ *
+ * ENV:
+ * DISCORD_TOKEN=xxxx
+ * PREFIX=$
+ * PORT=10000
  */
+
+require("dotenv").config();
+const express = require("express");
 
 const {
   Client,
@@ -18,22 +23,23 @@ const {
   Partials,
   PermissionsBitField,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 
-require("dotenv").config();
-
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+if (!DISCORD_TOKEN) throw new Error("❌ Missing DISCORD_TOKEN in env");
+
 const PREFIX = process.env.PREFIX || "$";
 const PORT = process.env.PORT || 10000;
 
-if (!DISCORD_TOKEN) throw new Error("❌ Missing DISCORD_TOKEN in env");
-
-const express = require("express");
+// ===== Render keep-alive web =====
 const app = express();
-app.get("/", (req, res) => res.send("Questy Final MultiBot running ✅"));
-app.listen(PORT, () => console.log(`🌐 Web alive on port ${PORT}`));
+app.get("/", (req, res) => res.send("1Love MultiBot running ✅"));
+app.listen(PORT, () => console.log("🌐 Web alive on port", PORT));
 
-// ======= EMOJIS (FIXED) =======
+// ===== Emojis (YOUR IDs) =====
 const EMOJI = {
   ok: "<a:TICK_TICK:1214893859151286272>",
   no: "<a:4NDS_wrong:1458407390419615756>",
@@ -43,128 +49,229 @@ const EMOJI = {
   q: "<a:question:1264568031019925545>",
 };
 
-// ======= EMBED STYLE (BLACK) =======
-const EMBED_COLOR = 0x000000;
-
-function makeEmbed(title, description) {
-  return new EmbedBuilder()
-    .setColor(EMBED_COLOR)
-    .setTitle(title || " ")
-    .setDescription(description || " ");
+// ===== Embed style (BLACK) =====
+const BLACK = 0x000000;
+function xlare(title, desc) {
+  return new EmbedBuilder().setColor(BLACK).setTitle(title).setDescription(desc);
 }
 
-// ======= SIMPLE DB (in-memory) =======
-// NOTE: Render restart pe reset ho jayega (free plan)
+// ===== Simple settings (edit here) =====
+const SETTINGS = {
+  welcomeEnabled: true,
+  leaveEnabled: true,
+  autoRoleEnabled: false, // turn ON if you want auto role
+  autoRoleId: "", // put role ID here if enabled
+  welcomeChannelName: "welcome",
+  logsChannelName: "mod-logs",
+  vcLogsChannelName: "voice-logs",
+};
+
+// ===== Auto Reply + Auto Reaction (edit here) =====
+const AUTO_REPLY = [
+  { trigger: "hi", reply: "hey 👋" },
+  { trigger: "hello", reply: "hello bro 😈" },
+  { trigger: "gm", reply: "good morning ☀️" },
+];
+
+const AUTO_REACTION = [
+  { trigger: "lol", emoji: "😂" },
+  { trigger: "love", emoji: "❤️" },
+];
+
+// ===== Whitelist System (in-memory) =====
+// NOTE: Render restart pe reset ho jayega
 const WL = {
+  prefixless: new Set(),
   ban: new Set(),
   mute: new Set(),
-  prefixless: new Set(),
+  lock: new Set(),
+  purge: new Set(),
   advertise: new Set(),
   spam: new Set(),
 };
 
+// ===== AFK System =====
 const AFK = new Map(); // userId => { reason, since }
 
-// ======= CLIENT =======
+// ===== Client =====
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message, Partials.User],
 });
 
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ======= HELP TEXT =======
-function helpText() {
-  return `
-${EMOJI.q} **Commands**
-**Prefix:** \`${PREFIX}\`
-
-**Moderation**
-• \`${PREFIX}ban @user [reason]\`
-• \`${PREFIX}unban userId\`
-• \`${PREFIX}mute @user [time] [reason]\` (example: 10m, 1h)
-• \`${PREFIX}unmute @user\`
-
-**Channel**
-• \`${PREFIX}lock\`
-• \`${PREFIX}unlock\`
-
-**Utility**
-• \`${PREFIX}purge <amount>\`
-• \`${PREFIX}ping\`
-
-**AFK**
-• \`${PREFIX}afk [reason]\`
-
-**Whitelist (Admins/Owner only)**
-• \`${PREFIX}wl add <ban|mute|prefixless|advertise|spam> @user\`
-• \`${PREFIX}wl remove <ban|mute|prefixless|advertise|spam> @user\`
-• \`${PREFIX}wl list\`
-
-${EMOJI.ok} **Whitelist Users** can run these WITHOUT prefix:
-\`ban mute unmute lock unlock purge\`
-`;
-}
-
-// ======= UTILS =======
-function isAdmin(member) {
-  return member.permissions.has(PermissionsBitField.Flags.Administrator);
-}
-
+// ===== Helpers =====
 function isOwner(member) {
-  return member.id === member.guild.ownerId;
+  return member?.id === member?.guild?.ownerId;
 }
 
-function canManageWL(member) {
-  return isAdmin(member) || isOwner(member);
+function isAdmin(member) {
+  return (
+    member?.permissions?.has(PermissionsBitField.Flags.Administrator) || isOwner(member)
+  );
 }
 
-function parseDuration(str) {
-  // 10m, 1h, 2d
-  if (!str) return null;
-  const match = str.toLowerCase().match(/^(\d+)(s|m|h|d)$/);
-  if (!match) return null;
-  const num = parseInt(match[1], 10);
-  const unit = match[2];
-  const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[unit];
-  return num * mult;
-}
-
-function formatSince(ms) {
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const day = Math.floor(hr / 24);
-  return `${day}d`;
+function parseArgs(str) {
+  return str.trim().split(/\s+/);
 }
 
 function getMentionedUser(message) {
   return message.mentions.users.first() || null;
 }
 
-function getWLType(type) {
-  if (!type) return null;
-  const t = type.toLowerCase();
-  if (!["ban", "mute", "prefixless", "advertise", "spam"].includes(t)) return null;
-  return t;
+function cleanId(arg) {
+  if (!arg) return null;
+  const m = arg.match(/^<@!?(\d+)>$/);
+  if (m) return m[1];
+  if (/^\d+$/.test(arg)) return arg;
+  return null;
 }
 
 function hasWL(member, type) {
-  if (!type) return false;
+  if (!member) return false;
+  if (isAdmin(member)) return true;
   return WL[type]?.has(member.id);
 }
 
-// ======= COMMAND HANDLER =======
+function formatSince(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+async function getOrCreateChannel(guild, name) {
+  let ch = guild.channels.cache.find((c) => c.name === name);
+  if (!ch) {
+    ch = await guild.channels.create({
+      name,
+      reason: "Auto setup channel",
+    });
+  }
+  return ch;
+}
+
+async function logTo(guild, channelName, embed) {
+  try {
+    const ch = guild.channels.cache.find((c) => c.name === channelName);
+    if (ch) await ch.send({ embeds: [embed] });
+  } catch {}
+}
+
+// ===== Welcome / Leave =====
+client.on("guildMemberAdd", async (member) => {
+  try {
+    if (SETTINGS.autoRoleEnabled && SETTINGS.autoRoleId) {
+      const role = member.guild.roles.cache.get(SETTINGS.autoRoleId);
+      if (role) await member.roles.add(role).catch(() => {});
+    }
+
+    if (!SETTINGS.welcomeEnabled) return;
+
+    const welcomeCh = await getOrCreateChannel(member.guild, SETTINGS.welcomeChannelName);
+    const emb = xlare(
+      `${EMOJI.ok} Welcome`,
+      `Welcome ${member} to **${member.guild.name}**!\nEnjoy your stay 😈`
+    );
+    await welcomeCh.send({ embeds: [emb] });
+  } catch {}
+});
+
+client.on("guildMemberRemove", async (member) => {
+  try {
+    if (!SETTINGS.leaveEnabled) return;
+
+    const welcomeCh = await getOrCreateChannel(member.guild, SETTINGS.welcomeChannelName);
+    const emb = xlare(`${EMOJI.no} Member Left`, `**${member.user.tag}** left the server.`);
+    await welcomeCh.send({ embeds: [emb] });
+  } catch {}
+});
+
+// ===== VC Logs =====
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  try {
+    const guild = newState.guild;
+    const user = newState.member?.user;
+
+    if (!user) return;
+
+    // join
+    if (!oldState.channelId && newState.channelId) {
+      const emb = xlare(
+        `${EMOJI.ok} VC Join`,
+        `${user.tag} joined <#${newState.channelId}>`
+      );
+      await logTo(guild, SETTINGS.vcLogsChannelName, emb);
+    }
+
+    // leave
+    if (oldState.channelId && !newState.channelId) {
+      const emb = xlare(
+        `${EMOJI.no} VC Leave`,
+        `${user.tag} left <#${oldState.channelId}>`
+      );
+      await logTo(guild, SETTINGS.vcLogsChannelName, emb);
+    }
+  } catch {}
+});
+
+// ===== Reaction Roles (Buttons) =====
+// command: $rr create @role1 @role2
+async function sendReactionRolePanel(message, roles) {
+  const row = new ActionRowBuilder();
+  roles.slice(0, 5).forEach((r, i) => {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`rr_${r.id}`)
+        .setLabel(r.name)
+        .setStyle(ButtonStyle.Secondary)
+    );
+  });
+
+  const emb = xlare(`${EMOJI.ok} Roles`, `Click buttons to get roles.`);
+  await message.channel.send({ embeds: [emb], components: [row] });
+}
+
+client.on("interactionCreate", async (interaction) => {
+  try {
+    if (!interaction.isButton()) return;
+    if (!interaction.guild) return;
+
+    if (!interaction.customId.startsWith("rr_")) return;
+
+    const roleId = interaction.customId.replace("rr_", "");
+    const role = interaction.guild.roles.cache.get(roleId);
+
+    if (!role) return interaction.reply({ content: "Role not found.", ephemeral: true });
+
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+
+    if (member.roles.cache.has(roleId)) {
+      await member.roles.remove(roleId).catch(() => {});
+      return interaction.reply({ content: `Removed: ${role.name}`, ephemeral: true });
+    } else {
+      await member.roles.add(roleId).catch(() => {});
+      return interaction.reply({ content: `Added: ${role.name}`, ephemeral: true });
+    }
+  } catch (e) {
+    try {
+      return interaction.reply({ content: "Error.", ephemeral: true });
+    } catch {}
+  }
+});
+
+// ===== Message Commands =====
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild) return;
@@ -173,354 +280,355 @@ client.on("messageCreate", async (message) => {
     const content = message.content.trim();
     const lower = content.toLowerCase();
 
-    // ===== AFK REMOVE ON MESSAGE (XLARE STYLE: only remove, no spam replies) =====
+    // ===== AFK remove on message =====
     if (AFK.has(message.author.id)) {
+      const data = AFK.get(message.author.id);
       AFK.delete(message.author.id);
 
-      // small xlare style embed
-      const emb = makeEmbed(
+      const emb = xlare(
         `${EMOJI.ok} Welcome back!`,
-        `I removed your AFK. You were AFK since a few seconds ago.`
+        `I removed your AFK.\nYou were AFK since **${formatSince(Date.now() - data.since)}** ago.`
       );
       await message.reply({ embeds: [emb] }).catch(() => {});
-      // Continue command handling too
     }
 
-    // ===== Detect if message is a command =====
-    // 1) Normal prefix command
-    const isPrefixCmd = content.startsWith(PREFIX);
+    // ===== AFK mention reply =====
+    if (message.mentions.users.size > 0) {
+      for (const [id] of message.mentions.users) {
+        if (AFK.has(id)) {
+          const data = AFK.get(id);
+          const emb = xlare(
+            `${EMOJI.q} AFK`,
+            `<@${id}> is AFK\n**Reason:** ${data.reason}\n**Since:** ${formatSince(
+              Date.now() - data.since
+            )} ago`
+          );
+          await message.reply({ embeds: [emb] }).catch(() => {});
+          break;
+        }
+      }
+    }
 
-    // 2) Prefixless command ONLY for whitelist users (prefixless WL)
-    // Allowed prefixless commands: ban mute unmute lock unlock purge
-    const prefixlessAllowed = ["ban", "mute", "unmute", "lock", "unlock", "purge"];
+    // ===== Auto Reply (only if NOT command) =====
+    if (!content.startsWith(PREFIX)) {
+      for (const item of AUTO_REPLY) {
+        if (lower === item.trigger) {
+          await message.reply(item.reply).catch(() => {});
+          break;
+        }
+      }
 
-    const firstWord = content.split(/\s+/)[0].toLowerCase();
-    const isPrefixlessCmd =
+      for (const item of AUTO_REACTION) {
+        if (lower.includes(item.trigger)) {
+          await message.react(item.emoji).catch(() => {});
+          break;
+        }
+      }
+    }
+
+    // ===== Command Detection =====
+    const isPrefix = content.startsWith(PREFIX);
+
+    // Prefixless allowed ONLY for WL.prefixless
+    const prefixlessAllowed = [
+      "ban",
+      "unban",
+      "kick",
+      "mute",
+      "unmute",
+      "lock",
+      "unlock",
+      "hide",
+      "unhide",
+      "purge",
+    ];
+
+    const firstWord = content.split(/\s+/)[0]?.toLowerCase();
+    const isPrefixless =
       prefixlessAllowed.includes(firstWord) && hasWL(message.member, "prefixless");
 
-    // If not command => DO NOTHING (no "Unknown command" spam)
-    if (!isPrefixCmd && !isPrefixlessCmd) return;
+    if (!isPrefix && !isPrefixless) return;
 
-    // ===== Parse args =====
-    let cmd = "";
-    let args = [];
+    // ===== Parse command =====
+    let cmdText = "";
+    if (isPrefix) cmdText = content.slice(PREFIX.length).trim();
+    else cmdText = content;
 
-    if (isPrefixCmd) {
-      const sliced = content.slice(PREFIX.length).trim();
-      if (!sliced) return;
-      args = sliced.split(/\s+/);
-      cmd = args.shift()?.toLowerCase();
-    } else {
-      // prefixless
-      args = content.split(/\s+/);
-      cmd = args.shift()?.toLowerCase();
-    }
+    const parts = parseArgs(cmdText);
+    const cmd = parts.shift()?.toLowerCase();
 
-    if (!cmd) return;
-
-    // ===== COMMANDS =====
-    // ping
+    // ===== Commands =====
     if (cmd === "ping") {
-      const emb = makeEmbed(`${EMOJI.ok} Pong!`, `Latency: **${client.ws.ping}ms**`);
+      const emb = xlare(`${EMOJI.ok} Pong!`, `Latency: **${client.ws.ping}ms**`);
       return message.reply({ embeds: [emb] });
     }
 
-    // help
     if (cmd === "help") {
-      const emb = makeEmbed(`${EMOJI.q} Help`, helpText());
-      return message.reply({ embeds: [emb] });
-    }
-
-    // afk
-    if (cmd === "afk") {
-      const reason = args.join(" ").trim() || "AFK";
-      AFK.set(message.author.id, { reason, since: Date.now() });
-
-      const emb = makeEmbed(
-        `${EMOJI.ok} AFK Enabled`,
-        `**Reason:** ${reason}\n**Set by:** <@${message.author.id}>`
+      const emb = xlare(
+        `${EMOJI.q} Help`,
+        `**Prefix:** \`${PREFIX}\`\n\n` +
+          `**Public:** \`${PREFIX}help\`, \`${PREFIX}ping\`, \`${PREFIX}afk\`\n` +
+          `**Moderation:** ban/unban/kick/mute/unmute\n` +
+          `**Channel:** lock/unlock/hide/unhide\n` +
+          `**Utility:** purge\n` +
+          `**Whitelist:** \`${PREFIX}wl add/remove/list\`\n` +
+          `**Reaction Roles:** \`${PREFIX}rr create @role1 @role2 ...\`\n\n` +
+          `${EMOJI.ok} Whitelisted users can use commands without prefix.`
       );
       return message.reply({ embeds: [emb] });
     }
 
-    // whitelist commands
+    // AFK
+    if (cmd === "afk") {
+      const reason = parts.join(" ") || "AFK";
+      AFK.set(message.author.id, { reason, since: Date.now() });
+
+      const emb = xlare(
+        `${EMOJI.ok} AFK Enabled`,
+        `You're now set AFK.\n**Reason:** ${reason}`
+      );
+      return message.reply({ embeds: [emb] });
+    }
+
+    // WL
     if (cmd === "wl") {
-      if (!canManageWL(message.member)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `Only **Admins/Owner** can manage whitelist.`
-        );
+      if (!isAdmin(message.member) && !isOwner(message.member)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Only Admin/Owner can use this.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const action = args[0]?.toLowerCase();
-      if (!action || !["add", "remove", "list"].includes(action)) {
-        const emb = makeEmbed(
+      const action = (parts.shift() || "").toLowerCase();
+      const type = (parts.shift() || "").toLowerCase();
+      const user = message.mentions.users.first();
+
+      if (!["add", "remove", "list"].includes(action)) {
+        const emb = xlare(
           `${EMOJI.q} Whitelist`,
-          `Usage:\n\`${PREFIX}wl add <ban|mute|prefixless|advertise|spam> @user\`\n\`${PREFIX}wl remove <type> @user\`\n\`${PREFIX}wl list\``
+          `Usage:\n\`${PREFIX}wl add prefixless @user\`\n\`${PREFIX}wl remove prefixless @user\`\n\`${PREFIX}wl list\``
         );
         return message.reply({ embeds: [emb] });
       }
 
       if (action === "list") {
-        const emb = makeEmbed(
+        const emb = xlare(
           `${EMOJI.q} Whitelist List`,
-          `**Ban WL:** ${WL.ban.size}\n**Mute WL:** ${WL.mute.size}\n**Prefixless WL:** ${WL.prefixless.size}\n**Advertise WL:** ${WL.advertise.size}\n**Spam WL:** ${WL.spam.size}`
+          `prefixless: **${WL.prefixless.size}**\nban: **${WL.ban.size}**\nmute: **${WL.mute.size}**\nlock: **${WL.lock.size}**\npurge: **${WL.purge.size}**`
         );
         return message.reply({ embeds: [emb] });
       }
 
-      const type = getWLType(args[1]);
-      const user = getMentionedUser(message);
-
-      if (!type) {
-        const emb = makeEmbed(
+      if (!WL[type]) {
+        const emb = xlare(
           `${EMOJI.no} Invalid Type`,
-          `Valid types: \`ban mute prefixless advertise spam\``
+          `Valid: prefixless, ban, mute, lock, purge, advertise, spam`
         );
         return message.reply({ embeds: [emb] });
       }
 
       if (!user) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Invalid User`,
-          `You didn't provide a valid user.\nExample: \`${PREFIX}wl ${action} ${type} @user\``
-        );
+        const emb = xlare(`${EMOJI.no} Invalid User`, `Mention a valid user.`);
         return message.reply({ embeds: [emb] });
       }
 
       if (action === "add") {
         WL[type].add(user.id);
-        const emb = makeEmbed(
-          `${EMOJI.ok} Whitelisted`,
-          `${EMOJI.ok} Added <@${user.id}> to **${type}** whitelist.`
-        );
+        const emb = xlare(`${EMOJI.ok} Whitelisted`, `Added ${user} to **${type}** WL.`);
         return message.reply({ embeds: [emb] });
       }
 
       if (action === "remove") {
         WL[type].delete(user.id);
-        const emb = makeEmbed(
-          `${EMOJI.ok} Removed`,
-          `${EMOJI.ok} Removed <@${user.id}> from **${type}** whitelist.`
-        );
+        const emb = xlare(`${EMOJI.ok} Removed`, `Removed ${user} from **${type}** WL.`);
         return message.reply({ embeds: [emb] });
       }
     }
 
-    // ===== LOCK / UNLOCK =====
-    if (cmd === "lock" || cmd === "unlock") {
-      // Permission check: Admin OR WL.lock? (we use ban WL or mute WL? -> keep admin)
+    // RR Panel
+    if (cmd === "rr" && parts[0] === "create") {
+      if (!isAdmin(message.member)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Admin only.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      const roleMentions = message.mentions.roles;
+      if (!roleMentions || roleMentions.size === 0) {
+        const emb = xlare(
+          `${EMOJI.q} Reaction Roles`,
+          `Usage: \`${PREFIX}rr create @Role1 @Role2\``
+        );
+        return message.reply({ embeds: [emb] });
+      }
+
+      return sendReactionRolePanel(message, [...roleMentions.values()]);
+    }
+
+    // LOCK / UNLOCK
+    if (cmd === "lock") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `You need **Manage Channels** permission.`
-        );
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Manage Channels**.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const channel = message.channel;
+      await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+        SendMessages: false,
+      });
 
-      if (cmd === "lock") {
-        await channel.permissionOverwrites.edit(message.guild.roles.everyone, {
-          SendMessages: false,
-        });
-
-        const emb = makeEmbed(
-          `${EMOJI.lock} Locked`,
-          `${EMOJI.lock} Channel locked successfully.`
-        );
-        return message.reply({ embeds: [emb] });
-      }
-
-      if (cmd === "unlock") {
-        await channel.permissionOverwrites.edit(message.guild.roles.everyone, {
-          SendMessages: true,
-        });
-
-        const emb = makeEmbed(
-          `${EMOJI.ok} Unlocked`,
-          `${EMOJI.ok} Channel unlocked successfully.`
-        );
-        return message.reply({ embeds: [emb] });
-      }
+      const emb = xlare(`${EMOJI.lock} Locked`, `${EMOJI.lock} Channel locked successfully.`);
+      return message.reply({ embeds: [emb] });
     }
 
-    // ===== PURGE =====
+    if (cmd === "unlock") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Manage Channels**.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+        SendMessages: true,
+      });
+
+      const emb = xlare(`${EMOJI.ok} Unlocked`, `${EMOJI.ok} Channel unlocked successfully.`);
+      return message.reply({ embeds: [emb] });
+    }
+
+    // HIDE / UNHIDE
+    if (cmd === "hide") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Manage Channels**.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+        ViewChannel: false,
+      });
+
+      const emb = xlare(`${EMOJI.lock} Hidden`, `${EMOJI.lock} Channel hidden successfully.`);
+      return message.reply({ embeds: [emb] });
+    }
+
+    if (cmd === "unhide") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Manage Channels**.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+        ViewChannel: true,
+      });
+
+      const emb = xlare(`${EMOJI.ok} Unhidden`, `${EMOJI.ok} Channel unhidden successfully.`);
+      return message.reply({ embeds: [emb] });
+    }
+
+    // PURGE
     if (cmd === "purge") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `You need **Manage Messages** permission.`
-        );
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Manage Messages**.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const amount = parseInt(args[0], 10);
+      const amount = parseInt(parts[0], 10);
       if (!amount || amount < 1 || amount > 100) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Invalid Amount`,
-          `Usage: \`${PREFIX}purge 10\`\nMin: 1 | Max: 100`
-        );
+        const emb = xlare(`${EMOJI.no} Invalid`, `Usage: \`${PREFIX}purge 1-100\``);
         return message.reply({ embeds: [emb] });
       }
 
       await message.channel.bulkDelete(amount, true).catch(() => {});
-      const emb = makeEmbed(
-        `${EMOJI.ok} Purged`,
-        `${EMOJI.ok} Deleted **${amount}** messages.`
-      );
-      return message.channel.send({ embeds: [emb] }).then((m) => {
-        setTimeout(() => m.delete().catch(() => {}), 3000);
-      });
+      const emb = xlare(`${EMOJI.ok} Purged`, `${EMOJI.ok} Deleted **${amount}** messages.`);
+      const sent = await message.channel.send({ embeds: [emb] });
+      setTimeout(() => sent.delete().catch(() => {}), 3000);
+      return;
     }
 
-    // ===== BAN / UNBAN =====
+    // BAN / UNBAN / KICK / MUTE / UNMUTE
     if (cmd === "ban") {
-      // if prefixless used => only WL.prefixless allowed already
-      // but still check actual permission:
       if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `You need **Ban Members** permission.`
-        );
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Ban Members**.`);
         return message.reply({ embeds: [emb] });
       }
 
       const user = getMentionedUser(message);
       if (!user) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Invalid User`,
-          `You didn't provide a valid user.\nUsage: \`${PREFIX}ban @user reason\``
-        );
+        const emb = xlare(`${EMOJI.no} Invalid User`, `You didn't provide a valid user.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const reason = args.slice(1).join(" ") || "No reason";
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-
-      if (member && !member.bannable) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Can't Ban`,
-          `I can't ban this user (role higher / missing permission).`
-        );
-        return message.reply({ embeds: [emb] });
-      }
-
+      const reason = parts.slice(1).join(" ") || "No reason";
       await message.guild.members.ban(user.id, { reason }).catch(() => {});
-      const emb = makeEmbed(
-        `${EMOJI.ok} Banned`,
-        `${EMOJI.ok} **${user.tag}** was banned.\n**Reason:** ${reason}`
-      );
+      const emb = xlare(`${EMOJI.ok} Banned`, `${EMOJI.ok} ${user.tag} banned.\nReason: ${reason}`);
       return message.reply({ embeds: [emb] });
     }
 
     if (cmd === "unban") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `You need **Ban Members** permission.`
-        );
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Ban Members**.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const userId = args[0];
-      if (!userId || isNaN(userId)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Invalid User`,
-          `Usage: \`${PREFIX}unban userId\``
-        );
+      const id = cleanId(parts[0]);
+      if (!id) {
+        const emb = xlare(`${EMOJI.no} Invalid User`, `Usage: \`${PREFIX}unban userId\``);
         return message.reply({ embeds: [emb] });
       }
 
-      await message.guild.members.unban(userId).catch(() => {});
-      const emb = makeEmbed(
-        `${EMOJI.ok} Unbanned`,
-        `${EMOJI.ok} Unbanned **${userId}**`
-      );
+      await message.guild.members.unban(id).catch(() => {});
+      const emb = xlare(`${EMOJI.ok} Unbanned`, `${EMOJI.ok} Unbanned **${id}**`);
       return message.reply({ embeds: [emb] });
     }
 
-    // ===== MUTE / UNMUTE =====
-    if (cmd === "mute") {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `You need **Timeout Members** permission.`
-        );
+    if (cmd === "kick") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Kick Members**.`);
         return message.reply({ embeds: [emb] });
       }
 
       const user = getMentionedUser(message);
       if (!user) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Invalid User`,
-          `You didn't provide a valid user.\nUsage: \`${PREFIX}mute @user 10m reason\``
-        );
+        const emb = xlare(`${EMOJI.no} Invalid User`, `You didn't provide a valid user.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-      if (!member) {
-        const emb = makeEmbed(`${EMOJI.no} Error`, `User not found in server.`);
+      const mem = await message.guild.members.fetch(user.id).catch(() => null);
+      if (!mem) {
+        const emb = xlare(`${EMOJI.no} Error`, `User not found.`);
         return message.reply({ embeds: [emb] });
       }
 
-      const duration = parseDuration(args[1]) || 10 * 60 * 1000; // default 10m
-      const reason = args.slice(2).join(" ") || "No reason";
+      await mem.kick().catch(() => {});
+      const emb = xlare(`${EMOJI.ok} Kicked`, `${EMOJI.ok} ${user.tag} kicked.`);
+      return message.reply({ embeds: [emb] });
+    }
 
-      await member.timeout(duration, reason).catch(() => {});
-      const emb = makeEmbed(
-        `${EMOJI.ok} Muted`,
-        `${EMOJI.ok} Muted <@${member.id}> for **${formatSince(duration)}**\n**Reason:** ${reason}`
-      );
+    if (cmd === "mute") {
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Timeout Members**.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      const user = getMentionedUser(message);
+      if (!user) {
+        const emb = xlare(`${EMOJI.no} Invalid User`, `You didn't provide a valid user.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      const mem = await message.guild.members.fetch(user.id).catch(() => null);
+      if (!mem) {
+        const emb = xlare(`${EMOJI.no} Error`, `User not found.`);
+        return message.reply({ embeds: [emb] });
+      }
+
+      const durationMs = 10 * 60 * 1000; // default 10m
+      await mem.timeout(durationMs, "Muted").catch(() => {});
+      const emb = xlare(`${EMOJI.ok} Muted`, `${EMOJI.ok} ${user.tag} muted for 10m.`);
       return message.reply({ embeds: [emb] });
     }
 
     if (cmd === "unmute") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
-        const emb = makeEmbed(
-          `${EMOJI.no} No Permission`,
-          `You need **Timeout Members** permission.`
-        );
+        const emb = xlare(`${EMOJI.no} No Permission`, `Need **Timeout Members**.`);
         return message.reply({ embeds: [emb] });
       }
 
       const user = getMentionedUser(message);
       if (!user) {
-        const emb = makeEmbed(
-          `${EMOJI.no} Invalid User`,
-          `Usage: \`${PREFIX}unmute @user\``
-        );
-        return message.reply({ embeds: [emb] });
-      }
-
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-      if (!member) {
-        const emb = makeEmbed(`${EMOJI.no} Error`, `User not found in server.`);
-        return message.reply({ embeds: [emb] });
-      }
-
-      await member.timeout(null).catch(() => {});
-      const emb = makeEmbed(
-        `${EMOJI.ok} Unmuted`,
-        `${EMOJI.ok} Unmuted <@${member.id}> successfully.`
-      );
-      return message.reply({ embeds: [emb] });
-    }
-
-    // Unknown command => NO REPLY (silent)
-    return;
-  } catch (err) {
-    console.log("messageCreate error:", err);
-
-    const emb = makeEmbed(
-      `${EMOJI.no} Error`,
-      `Something went wrong.\n\`\`\`${String(err).slice(0, 1500)}\`\`\``
-    );
-
-    return message.reply({ embeds: [emb] }).catch(() => {});
-  }
-});
-
-client.login(DISCORD_TOKEN);
+        const emb = xlare(`${EMOJI.no} Invalid User`, `You didn't provide a valid user.
