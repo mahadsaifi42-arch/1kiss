@@ -1,0 +1,17 @@
+{
+  "name": "questy-ai-music-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "@google/generative-ai": "^0.21.0",
+    "@discordjs/voice": "^0.17.0",
+    "play-dl": "^1.9.7",
+    "ffmpeg-static": "^5.2.0"
+  }
+}
